@@ -27,7 +27,7 @@ corr=0*torch.ones(dim,dim)
 
 all_determine_func=[1]
 
-def Time(n,N):
+def Time(n,N):   #将时间长度T给N等分
     t=n*T / N
     return t
 
@@ -48,7 +48,7 @@ def multi_sample_Brown_Motion(num_sample,expiry_time,initial_value):   #生成�
 #        plt.plot(torch.arange(0, N + 1).detach(), B[k, :].detach()) # 把各个布朗运动样本路径画出来
     return B
 
-#B_l=a_multi_sample_Brown_Motion(5,10,0)
+#B_l=multi_sample_Brown_Motion(5,10,0)
 #B_l=multi_sample_Brown_Motion(5,10)
 #print(B_l)
 #plt.plot(torch.arange(0, 10 + 1).detach(),B_l[0, :].detach())
@@ -67,7 +67,7 @@ def high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N):  #生成多个高�
 #    print(S)
     return S
 
-S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
+
 #S_0=2
 #S=S_0*torch.ones(K,N+1)
 
@@ -110,7 +110,7 @@ def contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,k,K,n,N,J):  #某一�
 #S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
 #S_n=contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,5,K,4,N,5)
 
-def continuation_value():
+def continuation_value():  #计算延续路径价值
     
     return 1
 
@@ -124,6 +124,7 @@ class stopping_determine_model(nn.Module):     #构建两层神经网络类
 
     def forward(self,x):
         x=self.net(x)
+#        x.squeeze(-1)
         return x
 
 def calcu_optimal_time(S_k,all_determine_func,n,N):  #计算n-th的最优停时
@@ -157,28 +158,44 @@ def n_average_approxi_expect_reward(S,K,n,N,all_determine_func):   #第n时刻�
     ave_reward=(1.0/K)*sum_reward
     return ave_reward
 
-def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=10,num_epochs=2):
+def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=5,num_epochs=5):  #n时刻决策函数的训练（N除外）
     data_iter=data.DataLoader(data.TensorDataset(S),batch_size,shuffle=True)
     target_train_obj=stopping_determine_model(n,dim,q_1)
     target_train_net=target_train_obj.net
     optimizer=torch.optim.SGD(target_train_net.parameters(),lr=lr)
     loss=nn.L1Loss()
-    all_determine_func.appendix(target_train_obj)
+    all_determine_func.append(target_train_obj)
 
     rwd=[n_average_approxi_expect_reward(S[0,:,:], batch_size, n, N, all_determine_func)]
 
     for p in range(num_epochs):
-        start=time.time()
-        for batch_index,S_k in enumerate(data_iter):
-            reward=n_average_approxi_expect_reward(S_k, batch_size, n, N, all_determine_func)
-            l=loss((1/reward),0)
+#       start=time.time()
+#        for batch_index,S_k in enumerate(data_iter):
+#            reward=n_average_approxi_expect_reward(S_k, batch_size, n, N, all_determine_func)
+#            l=loss((1/reward),torch.tensor(0))
+#            optimizer.zero_grad()
+#            l.backward()
+#            optimizer.step()
+#
+#            if (batch_index + 1) * batch_size % 100 == 0:
+#                rwd.append(n_average_approxi_expect_reward(S_k, batch_size, n, N, all_determine_func))
+#        print('reward(loss): %f, %f sec per epoch'%(rwd[-1],time.time()-start))
+
+        for index, S_k in enumerate(data_iter):
+            print('index is')
+            print(index)
+#        print('\n')
+            S_k_inlist = S_k[0]
+            reward = n_average_approxi_expect_reward(S_k_inlist, batch_size, n, N, all_determine_func)
+            l = loss((1 / reward), torch.tensor(0))
             optimizer.zero_grad()
             l.backward()
             optimizer.step()
 
-            if (batch_index + 1) * batch_size % 100 == 0:
-                rwd.append(n_average_approxi_expect_reward(S_k, batch_size, n, N, all_determine_func))
-        print('reward(loss): %f, %f sec per epoch'%(rwd[-1],time.time()-start))
+            rd = n_average_approxi_expect_reward(S_k_inlist, batch_size, n, N, all_determine_func)
+            print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
+            if (index + 1) * batch_size % 100 == 0:
+                rwd.append(n_average_approxi_expect_reward(S_k_inlist, batch_size, n, N, all_determine_func))
 
     plt.plot(np.linspace(0, num_epochs, len(rwd)),rwd)
     plt.xlabel('epoch')
@@ -186,13 +203,29 @@ def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=10,num_epochs=
     plt.show()
     return 1
 
-def optimize_all_determine_func(S,K,dim,N,q_1,all_determine_func):
-    all_determine_func[0]=stopping_determine_model(N,dim,q_1)
+def optimize_all_determine_func(S,K,dim,N,q_1,all_determine_func):   #倒向迭代（循环）训练所有时刻的决策函数
+    F_N = stopping_determine_model(N, dim, dim + 40)
+    F_N_net = F_N.net
+    data_iteration = data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
+    loss = nn.L1Loss()
+    optimizer_N = torch.optim.SGD(F_N_net.parameters(), lr=0.005)
+    for t in range(2):
+        for index, S_k in enumerate(data_iteration):
+            S_k_inlist = S_k[0]
+            for k in range(10):
+                l = loss(F_N.forward(S_k_inlist[k, :, N]), torch.tensor(1))
+                optimizer_N.zero_grad()
+                l.backward()
+                optimizer_N.step()
+
+    all_determine_func[0]=F_N
+
     for n in range(N+1):
         model=stopping_determine_model(N-n,dim,q_1)
-        all_determine_func.appendix(model)
+        all_determine_func.append(model)
 
 
+S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
 A=data.TensorDataset(S)
 #print(A[0])
 #print(S[0,:,:])
@@ -202,3 +235,61 @@ A=data.TensorDataset(S)
 #    print(S_k)
 #    print("\n")
 
+F_N=stopping_determine_model(N,dim,dim+40)
+F_N_net=F_N.net
+data_iteration=data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
+#print(data_iteration)
+loss=nn.L1Loss()
+optimizer_N=torch.optim.SGD(F_N_net.parameters(),lr=0.005)
+l=0
+#print(S)
+for t in range(2):
+#    start=time.time()
+#    print('epoch is %d'%(t))
+#    print('\n')
+    for index,S_k in enumerate(data_iteration):
+#        print('index is')
+#        print(index)
+#        print('\n')
+        print('S_k is')
+        print(S_k)
+#        print('\n')
+        S_k_inlist= S_k[0]
+#        print('S_k_inlist is')
+#        print(type(S_k_inlist))
+#        print(S_k_inlist)
+#        print('\n')
+        for k in range(10):
+            l = loss(F_N.forward(S_k_inlist[k, :, N]), torch.tensor(1))
+            optimizer_N.zero_grad()
+            l.backward()
+            optimizer_N.step()
+#            l = loss(F_N.forward(S_k_inlist[k,:, N]), torch.tensor(1))
+#        print('reward(loss): %f, %f sec per epoch \n' % (l, time.time() - start))
+
+all_determine_func[0]=F_N
+#print(all_determine_func[0])
+target_train_obj=stopping_determine_model(N-1,dim,dim+40)
+target_train_net=target_train_obj.net
+data_iter = data.DataLoader(data.TensorDataset(S), 5, shuffle=True)
+loss=nn.L1Loss()
+optimizer=torch.optim.SGD(target_train_net.parameters(),lr=0.001)
+all_determine_func.append(target_train_obj)
+
+for p in range(10):
+    start = time.time()
+    print('epoch is %d'%(p))
+    for index, S_k in enumerate(data_iter):
+        print('index is')
+        print(index)
+#        print('\n')
+        S_k_inlist=S_k[0]
+        reward = n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
+        l = loss((1 / reward), torch.tensor(0))
+        optimizer.zero_grad()
+        l.backward()
+        optimizer.step()
+        rd=n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
+        print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
+
+#print(all_determine_func)
