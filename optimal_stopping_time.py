@@ -14,8 +14,8 @@ r=0.15
 dim=5
 N=10
 T=15
+J=10
 executive_price=2
-tau=torch.zeros(N)
 #print(tau)
 I=2*torch.ones(N)
 #print(I)
@@ -26,6 +26,7 @@ sigma=0.2*torch.ones(dim)
 corr=0*torch.ones(dim,dim)
 
 all_determine_func=[1]
+tau=[]
 
 def Time(n,N):   #将时间长度T给N等分
     t=n*T / N
@@ -84,7 +85,7 @@ def plot_asset_price_path(S,K,dim,initial_point,N):  #对多个高维资产价�
 #print(S)
 #print(corr)
 
-def payoff(r,execute_price,n,N,s):  #n时刻的回报函数
+def payoff(r,execute_price,n,N,s):  #n时刻的回报函数(注意s是某一特定样本)
     g=torch.exp(torch.tensor(-r*Time(n,N)))*torch.relu(torch.max(s[:,n]-execute_price))
     return g
 
@@ -110,10 +111,6 @@ def contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,k,K,n,N,J):  #某一�
 #S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
 #S_n=contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,5,K,4,N,5)
 
-def continuation_value():  #计算延续路径价值
-    
-    return 1
-
 class stopping_determine_model(nn.Module):     #构建两层神经网络类
     def __init__(self,n,dim,q_1):
         super(stopping_determine_model, self).__init__()
@@ -127,28 +124,12 @@ class stopping_determine_model(nn.Module):     #构建两层神经网络类
 #        x.squeeze(-1)
         return x
 
-def calcu_optimal_time(S_k,all_determine_func,n,N):  #计算n-th的最优停时
-    if n==N:
-        t=N
-        return t
-    else:
-        t=0
-        for m in range(N-n+1):
-            if m==0:
-                t+=n*all_determine_func[N-n]
-            else:
-                multiple=1
-                for j in range(m):
-                    multiple*=(1-all_determine_func[N-n-j].forward(S_k[:,n+j]))
-                t+= ((n+m)*all_determine_func[m].forward(S_k[:,n+m])*multiple)
-        return t
-
 def n_k_approxi_expect_reward(S,k,K,n,N,all_determine_func):   #计算第n时刻k样本的回报估计
     if n == N:
         reward=payoff(r,executive_price,n,N,S[k-1,:,:])
         return reward
     else:
-        reward=payoff(r,executive_price,n,N,S[k-1,:,:])*all_determine_func[N-n].forward(S[k-1,:,n])+payoff(r,executive_price,calcu_optimal_time(S[k-1,:,:],all_determine_func,n+1,N),N,S[k-1,:,:])*(1-all_determine_func[N-n].forward(S[k-1,:,n]))
+        reward=payoff(r,executive_price,n,N,S[k-1,:,:])*all_determine_func[N-n].forward(S[k-1,:,n])+payoff(r,executive_price,n_k_calcu_optimal_time(S[k-1,:,:],all_determine_func,n+1,N),N,S[k-1,:,:])*(1-all_determine_func[N-n].forward(S[k-1,:,n]))
         return reward
 
 def n_average_approxi_expect_reward(S,K,n,N,all_determine_func):   #第n时刻的平均回报估计
@@ -206,13 +187,13 @@ def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=5,num_epochs=5
 def optimize_all_determine_func(S,K,dim,N,q_1,all_determine_func):   #倒向迭代（循环）训练所有时刻的决策函数
     F_N = stopping_determine_model(N, dim, dim + 40)
     F_N_net = F_N.net
-    data_iteration = data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
+    data_iteration = data.DataLoader(data.TensorDataset(S), 5, shuffle=True)    #batch_size可修改
     loss = nn.L1Loss()
-    optimizer_N = torch.optim.SGD(F_N_net.parameters(), lr=0.005)
-    for t in range(2):
-        for index, S_k in enumerate(data_iteration):
+    optimizer_N = torch.optim.SGD(F_N_net.parameters(), lr=0.005)   #学习率可修改
+    for t in range(4):                                              #epoch值可修改
+        for index, S_k in enumerate(data_iteration):                #S_k是列表里装着一个batch样本组成的矩阵
             S_k_inlist = S_k[0]
-            for k in range(10):
+            for k in range(5):
                 l = loss(F_N.forward(S_k_inlist[k, :, N]), torch.tensor(1))
                 optimizer_N.zero_grad()
                 l.backward()
@@ -224,6 +205,108 @@ def optimize_all_determine_func(S,K,dim,N,q_1,all_determine_func):   #倒向迭�
         model=stopping_determine_model(N-n,dim,q_1)
         all_determine_func.append(model)
 
+
+def n_k_calcu_optimal_time(S_k, all_determine_func, n, N):  # 计算n-th的最优停时(这里是得到最优决策函数后得到，为后面生成新的样本集计算上下界和置信区间服务)
+    if n == N:                                          #注意S_k代表意思是将某一样本输入得到对应的所有时刻对应的最优停时tau^k_n，来计算相应回报函数值和延续价值
+        t = N
+        return t
+    else:
+        t = 0
+        for m in range(N - n + 1):
+            if m == 0:
+                t += n * all_determine_func[N - n].forward(S_k[:,n+m])
+            else:
+                multiple = 1
+                for j in range(m):
+                    multiple *= (1 - all_determine_func[N - n - j].forward(S_k[:, n + j]))
+                t += ((n + m) * all_determine_func[N-n-m].forward(S_k[:, n + m]) * multiple)
+        return t
+
+def calcu_all_optimal_time(S_k,all_determine_func,N):    #计算所有时刻对应的最优停时并放到一个列表中储存,返回类型为list
+    tau=[]
+    for n in range(N+1):
+        t_n=n_k_calcu_optimal_time(S_k,all_determine_func,n,N)
+        tau.append(t_n)
+    return tau
+
+#J_n_k=high_dim_asset_price_path(S[k-1,:,n],delta,sigma,corr,J,dim,N-n) 生成延续路径
+
+def n_k_conti_path_sample_set_dim_expansion(J_n_k,J,dim,n,N):    #向前增加0使得新矩阵跟我们N时刻的矩阵在n方向分量维数相同，使得格式统一便于使用前面已设函数
+    New_matrix=torch.zeros(J,dim,N+1)
+    for m in range(N-n+1):
+        New_matrix[:,:,n+m]=J_n_k[:,:,m]
+    return New_matrix
+
+def n_k_continuation_value(J_n_k,all_determine_func, n, N, J):  # 计算延续路径价值(n小于N)，J_n_k代表新生成第k个样本n时刻的J个延续样本路径的样本集(注意这里的J_n_k是维数扩张后的样本集)
+    Val = 0
+    New_matrix=n_k_conti_path_sample_set_dim_expansion(J_n_k,J,dim,n,N)
+    for j in range(J):
+        New_n_k_j=New_matrix[j,:,:]
+        tau_next_j = n_k_calcu_optimal_time(New_n_k_j, all_determine_func, n+1, N)
+        Val+=tau_next_j
+    ave_Val=Val/J
+    return ave_Val
+
+def extra_modify_global_optimal_time(S_k,tau,all_determine_func,N):       #通过大小判断（根据论文最后计算全局最优停时的部分）修改全局最优停时tau_0,注意必须在全部tau算出来后进行
+    payoff_0=payoff(r,executive_price,0,N,S_k)    #第k个样本
+    optimal_time=0
+    if payoff_0<n_k_continuation_value(S,all_determine_func,1,N,K):   #注意这里我们借用延续价值函数来计算n=1时刻的回报函数的蒙特卡洛估计，而S的样本量够大因此可以认为是确定的近似估计
+        f_0=0                                                         #我们不以tau列表作为参数，我们直接使用全局设定的tau列表进行修改，因为tau列表是直接前面生成好，不需要像all_determine_func一样迭代计算
+        all_determine_func[N]=f_0
+        optimal_time=tau[1]
+    else:
+        f_0=1
+        all_determine_func[N]=f_0
+        optimal_time=tau[0]                     #刚开始就立刻停止
+    tau[0]=optimal_time
+    return tau
+
+def LowerBound(New_Sample,all_determine_func,K_L,N):
+    sum=0
+    for k in range(K_L):
+        k_tau=calcu_all_optimal_time(New_Sample[k,:,:],all_determine_func,N)
+        k_tau=extra_modify_global_optimal_time(New_Sample[k:,:],k_tau,all_determine_func,N)
+        k_payoff=payoff(r,executive_price,k_tau[0],N,New_Sample[k,:,:])
+        sum+=k_payoff
+    ave_sum=sum/K_L
+    return ave_sum
+
+def UpperBound(New_Sample,all_determine_func,delta,sigma,corr,dim,K_U,J,N):    #为统一记号方便计算和理解，我们令n=0的delta_M=0，我们先用集合将所有delta_M算出来后再进行求和
+    sum=0
+    for k in range(K_U):
+        delta_M_k = torch.zeros(N + 1)
+        M_k=torch.zeros(N+1)
+        payoff_k=torch.zeros(N+1)
+        for n in range(N+1):
+            # 计算n_k处payoff
+            payoff_n_k = payoff(r, executive_price, n, N, New_Sample[k, :, n])
+            payoff_k[n] = payoff_n_k
+            if n ==0:
+                delta_M_k[n]=0
+            else:
+                # 计算C_k_n
+                conti_path_sample_k_n=contiuation_high_dim_asset_path(New_Sample,delta,sigma,corr,dim,k,K_U,n,N,J)
+                Expand_path=n_k_conti_path_sample_set_dim_expansion(conti_path_sample_k_n,J,dim,n,N)
+                C_k_n=n_k_continuation_value(Expand_path,all_determine_func,n,N,J)
+                #计算C_k_(n-1)
+                conti_path_sample_k_n_former = contiuation_high_dim_asset_path(New_Sample, delta, sigma, corr, dim, k, K_U, n-1, N, J)
+                Expand_path_former = n_k_conti_path_sample_set_dim_expansion(conti_path_sample_k_n_former, J, dim, n-1, N)
+                C_k_n_former = n_k_continuation_value(Expand_path_former, all_determine_func, n, N, J)
+                #根据New_sample在n_k位置的值进行计算
+                delta_M_k_n=all_determine_func[N-n].forward(New_Sample[k,:,n])*payoff_n_k+(1-all_determine_func[N-n].forward(New_Sample[k,:,n]))*C_k_n - C_k_n_former
+                delta_M_k[n]=delta_M_k_n
+            #计算M_k_n
+            M_k_n=0
+            for m in range(n):
+                M_k_n+=delta_M_k[m]
+            M_k[n]=M_k_n
+        #计算sum
+        max_difference=torch.max(payoff_k-M_k)                  #计算n从0到N中的最大差
+        sum+=max_difference
+    ave_sum=sum/K_U
+    return ave_sum
+
+#以下为代码测试实例
 
 S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
 A=data.TensorDataset(S)
@@ -251,8 +334,8 @@ for t in range(2):
 #        print('index is')
 #        print(index)
 #        print('\n')
-        print('S_k is')
-        print(S_k)
+#        print('S_k is')
+#        print(S_k)
 #        print('\n')
         S_k_inlist= S_k[0]
 #        print('S_k_inlist is')
@@ -278,10 +361,10 @@ all_determine_func.append(target_train_obj)
 
 for p in range(10):
     start = time.time()
-    print('epoch is %d'%(p))
+#    print('epoch is %d'%(p))
     for index, S_k in enumerate(data_iter):
-        print('index is')
-        print(index)
+#        print('index is')
+#        print(index)
 #        print('\n')
         S_k_inlist=S_k[0]
         reward = n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
@@ -290,6 +373,24 @@ for p in range(10):
         l.backward()
         optimizer.step()
         rd=n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
-        print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
+#        print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
 
-#print(all_determine_func)
+print(all_determine_func)
+
+# 1 查看网络第一层(即第一个全连接层)的参数
+print(all_determine_func[1].net[0].state_dict())
+print('\n')
+# 2 查看网络第三层(即第二个全连接层)偏置参数的类型
+print(type(all_determine_func[1].net[2].bias))
+print('\n')
+# 3 查看网络第三层(即第二个全连接层)偏置参数
+#print(all_determine_func[1].net[2].bias)
+#print('\n')
+# 4 查看网络第三层(即第二个全连接层)偏置参数的值
+#print(all_determine_func[1].net[2].bias.data)
+#print('\n')
+# 5 查看网络第一层(即第一个全连接层)权重参数
+print(all_determine_func[1].net[0].weight)
+print('\n')
+# 6 查看网络第二层
+print(all_determine_func[1].net[1])
