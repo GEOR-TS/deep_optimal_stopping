@@ -4,6 +4,7 @@ import numpy as np
 from torch import nn
 from torch.utils import data
 from matplotlib import pyplot as plt
+from scipy.stats import norm
 #from d2l import torch as d2l
 
 x=torch.arange(-8.0,8.0,0.1,requires_grad=True)
@@ -15,6 +16,8 @@ dim=5
 N=10
 T=15
 J=10
+K_L=10
+K_U=10
 executive_price=2
 #print(tau)
 I=2*torch.ones(N)
@@ -261,18 +264,29 @@ def extra_modify_global_optimal_time(S_k,tau,all_determine_func,N):       #通�
     tau[0]=optimal_time
     return tau
 
-def LowerBound(New_Sample,all_determine_func,K_L,N):
+def LowerBound_and_variance(New_Sample,all_determine_func,K_L,N):     #用新样本集计算下界和渐近方差(以list返回)
     sum=0
+    payoff_Assemble=[]
+    square_sum=0
+    #计算下界
     for k in range(K_L):
         k_tau=calcu_all_optimal_time(New_Sample[k,:,:],all_determine_func,N)
         k_tau=extra_modify_global_optimal_time(New_Sample[k:,:],k_tau,all_determine_func,N)
         k_payoff=payoff(r,executive_price,k_tau[0],N,New_Sample[k,:,:])
+        payoff_Assemble.append(k_payoff)
         sum+=k_payoff
     ave_sum=sum/K_L
-    return ave_sum
+    #计算无偏方差
+    for k in range(K_L):
+        square_sum+=(payoff_Assemble[k]-ave_sum)**2
+    var=square_sum/(K_L-1)
+    return [ave_sum,var]
 
-def UpperBound(New_Sample,all_determine_func,delta,sigma,corr,dim,K_U,J,N):    #为统一记号方便计算和理解，我们令n=0的delta_M=0，我们先用集合将所有delta_M算出来后再进行求和
+def UpperBound_and_variance(New_Sample,all_determine_func,delta,sigma,corr,dim,K_U,J,N):    #用新样本集计算上界和渐近方差，为统一记号方便计算和理解，我们令n=0的delta_M=0，我们先用集合将所有delta_M算出来后再进行求和（以list返回）
     sum=0
+    max_diff_Assemble=[]
+    square_sum=0
+    #计算上界
     for k in range(K_U):
         delta_M_k = torch.zeros(N + 1)
         M_k=torch.zeros(N+1)
@@ -302,9 +316,24 @@ def UpperBound(New_Sample,all_determine_func,delta,sigma,corr,dim,K_U,J,N):    #
             M_k[n]=M_k_n
         #计算sum
         max_difference=torch.max(payoff_k-M_k)                  #计算n从0到N中的最大差
+        max_diff_Assemble.append(max_difference)
         sum+=max_difference
     ave_sum=sum/K_U
-    return ave_sum
+    #计算无偏方差
+    for k in range(K_U):
+        square_sum+=(max_diff_Assemble[k]-ave_sum)**2
+    var=square_sum/(K_U-1)
+    return [ave_sum,var]
+
+def Point_est_and_Confidence_interval(alpha,LowBd_with_var,UppBd_with_var,K_L,K_U):        #计算点估计和置信区间(以list返回)
+    #计算点估计
+    Point_est = (LowBd_with_var[0] + UppBd_with_var[0]) / 2
+    #计算正态分布alpha/2分位数(下侧分位数)
+    z_alpha_half=norm.isf(q=alpha/2)
+    #计算置信区间
+    Interval_L=LowBd_with_var[0]-z_alpha_half*(LowBd_with_var[1]/torch.sqrt(torch.tensor(K_L)))
+    Interval_U=UppBd_with_var[0]+z_alpha_half*(UppBd_with_var[1]/torch.sqrt(torch.tensor(K_U)))
+    return [Point_est,[Interval_L,Interval_U]]
 
 #以下为代码测试实例
 
@@ -378,11 +407,11 @@ for p in range(10):
 print(all_determine_func)
 
 # 1 查看网络第一层(即第一个全连接层)的参数
-print(all_determine_func[1].net[0].state_dict())
-print('\n')
+#print(all_determine_func[1].net[0].state_dict())
+#print('\n')
 # 2 查看网络第三层(即第二个全连接层)偏置参数的类型
-print(type(all_determine_func[1].net[2].bias))
-print('\n')
+#print(type(all_determine_func[1].net[2].bias))
+#print('\n')
 # 3 查看网络第三层(即第二个全连接层)偏置参数
 #print(all_determine_func[1].net[2].bias)
 #print('\n')
@@ -390,7 +419,13 @@ print('\n')
 #print(all_determine_func[1].net[2].bias.data)
 #print('\n')
 # 5 查看网络第一层(即第一个全连接层)权重参数
-print(all_determine_func[1].net[0].weight)
-print('\n')
+#print(all_determine_func[1].net[0].weight)
+#print('\n')
 # 6 查看网络第二层
-print(all_determine_func[1].net[1])
+#print(all_determine_func[1].net[1])
+
+#测试有无gpu
+print(torch.cuda.is_available())
+print(torch.cuda.device_count())
+#查看pytorch版本
+print(torch.__version__)
