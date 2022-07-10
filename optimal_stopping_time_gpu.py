@@ -7,6 +7,8 @@ from matplotlib import pyplot as plt
 from scipy.stats import norm
 #from d2l import torch as d2l
 
+time_0=time.time()
+
 x=torch.arange(-8.0,8.0,0.1,requires_grad=True)
 y=torch.relu(x)
 
@@ -347,13 +349,13 @@ A=data.TensorDataset(S)
 
 F_N=stopping_determine_model(N,dim,dim+40).cuda()
 F_N_net=F_N.net
-data_iteration=data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
+data_iteration=data.DataLoader(data.TensorDataset(S), 10, shuffle=True,pin_memory=True,num_workers=8)
 #print(data_iteration)
 loss=nn.L1Loss().cuda()
-optimizer_N=torch.optim.SGD(F_N_net.parameters(),lr=0.005)
+optimizer_N=torch.optim.SGD(F_N_net.parameters(),lr=0.01)
 l=0
 #print(S)
-for t in range(2):
+for t in range(1):
 #    start=time.time()
 #    print('epoch is %d'%(t))
 #    print('\n')
@@ -381,28 +383,33 @@ all_determine_func[0]=F_N
 #print(all_determine_func[0])
 target_train_obj=stopping_determine_model(N-1,dim,dim+40).cuda()
 target_train_net=target_train_obj.net
-data_iter = data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
+data_iter = data.DataLoader(data.TensorDataset(S), 100, shuffle=True,pin_memory=True,num_workers=8)
 loss=nn.L1Loss().cuda()
-optimizer=torch.optim.SGD(target_train_net.parameters(),lr=0.001)
+optimizer=torch.optim.SGD(target_train_net.parameters(),lr=0.003)
 all_determine_func.append(target_train_obj)
 
-for p in range(10):
+for p in range(5):
     start = time.time()
     print('epoch is %d'%(p))
+    rwd=[]
     for index, S_k in enumerate(data_iter):
         print('index is')
         print(index)
         print('\n')
         S_k_inlist=S_k[0]
-        reward = n_average_approxi_expect_reward(S_k_inlist, 10, N-1, N, all_determine_func)
+        reward = n_average_approxi_expect_reward(S_k_inlist, 500, N-1, N, all_determine_func)
         l = loss((1 / reward), torch.tensor(0).cuda())
         optimizer.zero_grad()
         l.backward()
         optimizer.step()
-        rd=n_average_approxi_expect_reward(S_k_inlist, 10, N-1, N, all_determine_func)
+        rd=n_average_approxi_expect_reward(S_k_inlist, 500, N-1, N, all_determine_func)
         print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
-
-print(all_determine_func)
+        rwd.append(rd)
+#    plt.plot(range(5000), rwd)
+#    plt.xlabel('time')
+#    plt.ylabel('reward(loss)')
+#    plt.show()
+#print(all_determine_func)
 
 # 1 查看网络第一层(即第一个全连接层)的参数
 #print(all_determine_func[1].net[0].state_dict())
@@ -423,5 +430,8 @@ print(all_determine_func)
 #print(all_determine_func[1].net[1])
 
 #测试有无gpu
-print(torch.cuda.is_available())
-print(torch.cuda.device_count())
+#print(torch.cuda.is_available())
+#print(torch.cuda.device_count())
+#程序运行时间
+print('Total use of time: %f' %(time.time()-time_0))
+print('Total num of samples: %d' %(K))

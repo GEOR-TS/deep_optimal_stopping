@@ -5,31 +5,38 @@ from torch import nn
 from torch.utils import data
 from matplotlib import pyplot as plt
 from scipy.stats import norm
+import pandas as pd
+import visdom
 #from d2l import torch as d2l
 
-x=torch.arange(-8.0,8.0,0.1,requires_grad=True)
-y=torch.relu(x)
+#'--fp16'
 
-K=10
-r=0.15
-dim=5
-N=10
-T=15
-J=10
-K_L=10
-K_U=10
-executive_price=2
+time_0=time.time()                             #记录程序开始的时间，为后面测算运行时间做准备
+viz=visdom.Visdom(env="Optimal_Stopping_cpu")  #建立visdom环境，初始化，然后可以通过终端打开网页进行实时训练监控
+
+#x=torch.arange(-8.0,8.0,0.1,requires_grad=True)
+#y=torch.relu(x)
+
+K=1000000                          #训练样本路径总数K
+r=0.15                             #内在资产回报率
+dim=5                              #资产组合维数
+N=9                                #期权行权时长的等分数，表示有N个可能的行权时间
+T=15                               #行权最大时长，即过期时间
+J=10                               #延续路径样本数
+K_L=10                             #用于估计期望回报下界的样本路径数
+K_U=10                             #用于估计期望回报上界的样本路径数
+executive_price=2                  #行权价格
 #print(tau)
 I=2*torch.ones(N)
 #print(I)
 
-s_0=2*torch.ones(dim)
-delta=0.1*torch.ones(dim)
-sigma=0.2*torch.ones(dim)
-corr=0*torch.ones(dim,dim)
+s_0=2*torch.ones(dim)              #0时刻的资产组合的初始价格向量
+delta=0.1*torch.ones(dim)          #资产组合的各资产分红
+sigma=0.2*torch.ones(dim)          #资产组合的各资产波动率
+corr=0*torch.ones(dim,dim)         #资产组合之间的相关系数矩阵
 
-all_determine_func=[1]
-tau=[]
+all_determine_func=[1]             #用于存放所有时刻决策函数神经网络模型
+tau=[]                             #用于存放所有时刻的最优停时
 
 def Time(n,N):   #将时间长度T给N等分
     t=n*T / N
@@ -49,7 +56,7 @@ def multi_sample_Brown_Motion(num_sample,expiry_time,initial_value):   #生成�
     B = initial_value*torch.ones(num_sample, expiry_time + 1)
     for k in range(num_sample):
         B[k,:] = B[k,:]+std_Brown_Motion_path(expiry_time)
-#        plt.plot(torch.arange(0, N + 1).detach(), B[k, :].detach()) # 把各个布朗运动样本路径画出来
+        plt.plot(torch.arange(0, N + 1).detach(), B[k, :].detach()) # 把各个布朗运动样本路径画出来
     return B
 
 #B_l=multi_sample_Brown_Motion(5,10,0)
@@ -68,7 +75,7 @@ def high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N):  #生成多个高�
             S[k,d,:]=s_0[d]*S[k,d,:]
             for i in range(N):
                 S[k, d,i+1] = S[k,d,0] * torch.exp((r - delta[d] - ((sigma[d] ** 2) / 2)) * (Time(i+1,N)) + sigma[d] * B[k, i + 1])
-#    print(S)
+    print(S)
     return S
 
 
@@ -98,15 +105,15 @@ def payoff(r,execute_price,n,N,s):  #n时刻的回报函数(注意s是某一特�
 
 def continuation_brown_motion_path(B,k,K,n,N,J):   #某一样本点的多个布朗运动延续样本路径
     B_n =  multi_sample_Brown_Motion(J,N-n,B[k-1,n])
-#    plt.plot(torch.arange(0, N + 1-n).detach(), B_n[0, :].detach())
-#    plt.plot(torch.arange(0, N + 1-n).detach(), B_n[1, :].detach())
-#    plt.plot(torch.arange(0, N + 1 - n).detach(), B_n[2, :].detach())
-#    plt.show()
+    plt.plot(torch.arange(0, N + 1-n).detach(), B_n[0, :].detach())
+    plt.plot(torch.arange(0, N + 1-n).detach(), B_n[1, :].detach())
+    plt.plot(torch.arange(0, N + 1 - n).detach(), B_n[2, :].detach())
+    plt.show()
     return B_n
 
 def contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,k,K,n,N,J):  #某一样本点的价格过程的延续样本路径
     S_n= high_dim_asset_price_path(S[k-1,:,n],delta,sigma,corr,J,dim,N-n)
-#    plot_asset_price_path(S_n,J,dim,n,N-n)
+    plot_asset_price_path(S_n,J,dim,n,N-n)
     return S_n
 
 #B=multi_sample_Brown_Motion(K,N,0)
@@ -115,17 +122,30 @@ def contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,k,K,n,N,J):  #某一�
 #S_n=contiuation_high_dim_asset_path(S,delta,sigma,corr,dim,5,K,4,N,5)
 
 class stopping_determine_model(nn.Module):     #构建两层神经网络类
-    def __init__(self,n,dim,q_1):
+    def __init__(self,n,dim,q_1,N=N):           #初始化模型的各重要参数和多层感知网络
         super(stopping_determine_model, self).__init__()
+        self.N=N
         self.n=n
         self.dim=dim
         self.q_1=q_1
-        self.net=nn.Sequential(nn.Linear(self.dim,self.q_1),nn.ReLU(),nn.Linear(self.q_1,1),nn.LogSigmoid())
+        self.net=nn.Sequential(nn.Linear(self.dim,self.q_1),nn.ReLU(),nn.Linear(self.q_1,1),nn.Sigmoid())
 
-    def forward(self,x):
-        x=self.net(x)
-#        x.squeeze(-1)
-        return x
+    def forward(self,x):     #进行前馈计算/前向传播
+        if n==self.N:       #N时刻默认输出恒等于1
+            return 1
+        else:
+            x=self.net(x)
+#            x.squeeze(-1)
+            return x
+
+    def decision(self,x):    #根据sigmoid的决策概率值以0.5为分界得到决策
+        if self.net(x)<0.5:
+            return 0
+        else:
+            return 1
+
+    def rate_of_success(self):
+        pass
 
 def n_k_approxi_expect_reward(S,k,K,n,N,all_determine_func):   #计算第n时刻k样本的回报估计
     if n == N:
@@ -146,11 +166,11 @@ def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=5,num_epochs=5
     data_iter=data.DataLoader(data.TensorDataset(S),batch_size,shuffle=True)
     target_train_obj=stopping_determine_model(n,dim,q_1)
     target_train_net=target_train_obj.net
-    optimizer=torch.optim.SGD(target_train_net.parameters(),lr=lr)
-    loss=nn.L1Loss()
+    optimizer=torch.optim.Adam(target_train_net.parameters(),lr=lr)
+#    loss=nn.L1Loss()
     all_determine_func.append(target_train_obj)
 
-    rwd=[n_average_approxi_expect_reward(S[0,:,:], batch_size, n, N, all_determine_func)]
+    rwd=[n_average_approxi_expect_reward(S[0,:,:], batch_size, n, N, all_determine_func)]        #用于记录每次分好的batch的最后一个小批量样本的回报函数
 
     for p in range(num_epochs):
 #       start=time.time()
@@ -171,7 +191,7 @@ def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=5,num_epochs=5
 #        print('\n')
             S_k_inlist = S_k[0]
             reward = n_average_approxi_expect_reward(S_k_inlist, batch_size, n, N, all_determine_func)
-            l = loss((1 / reward), torch.tensor(0))
+            l = 0-reward
             optimizer.zero_grad()
             l.backward()
             optimizer.step()
@@ -183,7 +203,7 @@ def n_train_func(all_determine_func,lr,S,K,dim,n,N,q_1,batch_size=5,num_epochs=5
 
     plt.plot(np.linspace(0, num_epochs, len(rwd)),rwd)
     plt.xlabel('epoch')
-    plt.ylabel('reward(loss)')
+    plt.ylabel('reward')
     plt.show()
     return 1
 
@@ -207,7 +227,6 @@ def optimize_all_determine_func(S,K,dim,N,q_1,all_determine_func):   #倒向迭�
     for n in range(N+1):
         model=stopping_determine_model(N-n,dim,q_1)
         all_determine_func.append(model)
-
 
 def n_k_calcu_optimal_time(S_k, all_determine_func, n, N):  # 计算n-th的最优停时(这里是得到最优决策函数后得到，为后面生成新的样本集计算上下界和置信区间服务)
     if n == N:                                          #注意S_k代表意思是将某一样本输入得到对应的所有时刻对应的最优停时tau^k_n，来计算相应回报函数值和延续价值
@@ -266,7 +285,7 @@ def extra_modify_global_optimal_time(S_k,tau,all_determine_func,N):       #通�
 
 def LowerBound_and_variance(New_Sample,all_determine_func,K_L,N):     #用新样本集计算下界和渐近方差(以list返回)
     sum=0
-    payoff_Assemble=[]
+    payoff_Assemble=[]                   #将payoff用list全部记录下来方便后面求方差时调用
     square_sum=0
     #计算下界
     for k in range(K_L):
@@ -284,7 +303,7 @@ def LowerBound_and_variance(New_Sample,all_determine_func,K_L,N):     #用新样
 
 def UpperBound_and_variance(New_Sample,all_determine_func,delta,sigma,corr,dim,K_U,J,N):    #用新样本集计算上界和渐近方差，为统一记号方便计算和理解，我们令n=0的delta_M=0，我们先用集合将所有delta_M算出来后再进行求和（以list返回）
     sum=0
-    max_diff_Assemble=[]
+    max_diff_Assemble=[]               #将最大差用list记录下来方便后面计算方差时调用
     square_sum=0
     #计算上界
     for k in range(K_U):
@@ -334,11 +353,91 @@ def Point_est_and_Confidence_interval(alpha,LowBd_with_var,UppBd_with_var,K_L,K_
     Interval_L=LowBd_with_var[0]-z_alpha_half*(LowBd_with_var[1]/torch.sqrt(torch.tensor(K_L)))
     Interval_U=UppBd_with_var[0]+z_alpha_half*(UppBd_with_var[1]/torch.sqrt(torch.tensor(K_U)))
     return [Point_est,[Interval_L,Interval_U]]
+"""
+def combination_five_asset_to_one(assert1,assert2,assert3,assert4,assert5,sam_num):           
+    #这个函数将五个assert文件汇聚成一个文件，并将其整理为连续的格式
+    #首先要使用pd.read_csv将五个文件输出为assert1,assert2,assert3,assert4,assert5
+    #函数最终将整理好的文件return，格式为pd.DataFrame
+    arr1=np.array(range(sam_num*5),dtype=int,ndmin=2).T
+    arr2=np.empty([sam_num*5,10],dtype=float)
+    arr_sum=np.concatenate([arr1,arr2],axis=1)
+    assert_final=pd.DataFrame(arr_sum,columns=['rank',0,1,2,3,4,5,6,7,8,9])
+    assert_final.set_index('rank',inplace=True)
+    assert1.set_index('Unnamed: 0',inplace=True)
+    assert2.set_index('Unnamed: 0',inplace=True)
+    assert3.set_index('Unnamed: 0',inplace=True)
+    assert4.set_index('Unnamed: 0',inplace=True)
+    assert5.set_index('Unnamed: 0',inplace=True)
+    for i in range(sam_num*5):
+        temp=i%5
+        n=int(i/5)
+        if temp==0:
+            assert_final.iloc[i] = assert1.iloc[n]
+        elif temp==1:
+            assert_final.iloc[i] = assert2.iloc[n]
+        elif temp==2:
+            assert_final.iloc[i] = assert3.iloc[n]
+        elif temp==3:
+            assert_final.iloc[i] = assert4.iloc[n]
+        elif temp==4:
+            assert_final.iloc[i] = assert5.iloc[n]
+    return assert_final
+"""
+"""
+def load_asset_path_file(dim,K,N,control_string='Asset_'):    #加载csv文件，返回完整的所有资产的样本路径(注意，文件控制字符串在函数中进行更改)
+    S=np.ones((K,dim,N+1))                                    #这部分缺陷是加载速度过慢，故不用此方法进行输入
+    for d in range(dim):
+        file_path=control_string+str(d+1)+'.csv'
+        data_d=pd.DataFrame(pd.read_csv(file_path,index_col=0))
+        print('index: %d'%(d))
+#        print(data_d)
+        S_d=data_d.to_numpy()
+        S[:,d,:]=S_d
+#        print(S_d)
+#        print('\n')
+    return S
+"""
+class MyIterableDataset(data.IterableDataset):       #special for example 1 with 5 dimensional assets    构造了迭代器输入数据的迭代类，此部分代码与迭代器机制和python实现有关，可不具体了解，有兴趣可搜索网上资料
+    def __init__(self, file_path_1,file_path_2,file_path_3,file_path_4,file_path_5,K,dim,N,chunksize=100000):      #chunksize是每次迭代的样本块所含样本数
+        self.chunksize=chunksize
+        self.file_iter_1 = pd.read_csv(file_path_1, iterator=True, chunksize=chunksize,index_col=0)        #使用了pandas的csv输入方法，加上iteration后默认返回迭代格式数据
+        self.file_iter_2 = pd.read_csv(file_path_2, iterator=True, chunksize=chunksize,index_col=0)
+        self.file_iter_3 = pd.read_csv(file_path_3, iterator=True, chunksize=chunksize,index_col=0)
+        self.file_iter_4 = pd.read_csv(file_path_4, iterator=True, chunksize=chunksize,index_col=0)
+        self.file_iter_5 = pd.read_csv(file_path_5, iterator=True, chunksize=chunksize,index_col=0)
+        self.file_assemble_iter = np.ones((chunksize, dim, N + 1))    #将五个不同的资产组合样本块成一个5维资产组合样本块，这里是初始化这样一个矩阵
+        self.chunk_num = int(K / chunksize)           #计算块数
+
+    def __iter__(self):                            #编写迭代方式
+        for chunk_num in range(self.chunk_num):
+            for data_1 in self.file_iter_1:
+                self.file_assemble_iter[:,0,:]=data_1.to_numpy()
+            for data_2 in self.file_iter_2:
+                self.file_assemble_iter[:,1,:]=data_2.to_numpy()
+            for data_3 in self.file_iter_3:
+                self.file_assemble_iter[:,2,:]=data_3.to_numpy()
+            for data_4 in self.file_iter_4:
+                self.file_assemble_iter[:,3,:]=data_4.to_numpy()
+            for data_5 in self.file_iter_5:
+                self.file_assemble_iter[:,4,:]=data_5.to_numpy()
+            yield torch.from_numpy(self.file_assemble_iter).float()
+
+
+#        with open(self.file_path, 'r') as file_obj:
+#            for line in file_obj:
+#                line_data = line.strip('\n').split(',')
+#                yield torch.from_numpy(np.array(line_data, dtype='int')) # 这里按照自己的代码看格式哈
+
+
+#dataloader = DataLoader(MyDataset(), batch_size=5)
+
+#for i, item in enumerate(dataloader):
+#    print(i, item)
 
 #以下为代码测试实例
 
-S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
-A=data.TensorDataset(S)
+#S=high_dim_asset_price_path(s_0,delta,sigma,corr,K,dim,N)
+#A=data.TensorDataset(S)
 #print(A[0])
 #print(S[0,:,:])
 #data_iter=data.DataLoader(A,2,shuffle=True)
@@ -347,64 +446,53 @@ A=data.TensorDataset(S)
 #    print(S_k)
 #    print("\n")
 
-F_N=stopping_determine_model(N,dim,dim+40)
-F_N_net=F_N.net
-data_iteration=data.DataLoader(data.TensorDataset(S), 10, shuffle=True)
-#print(data_iteration)
-loss=nn.L1Loss()
-optimizer_N=torch.optim.SGD(F_N_net.parameters(),lr=0.005)
-l=0
-#print(S)
-for t in range(2):
-#    start=time.time()
-#    print('epoch is %d'%(t))
-#    print('\n')
-    for index,S_k in enumerate(data_iteration):
-#        print('index is')
-#        print(index)
-#        print('\n')
-#        print('S_k is')
-#        print(S_k)
-#        print('\n')
-        S_k_inlist= S_k[0]
-#        print('S_k_inlist is')
-#        print(type(S_k_inlist))
-#        print(S_k_inlist)
-#        print('\n')
-        for k in range(10):
-            l = loss(F_N.forward(S_k_inlist[k, :, N]), torch.tensor(1))
-            optimizer_N.zero_grad()
-            l.backward()
-            optimizer_N.step()
-#            l = loss(F_N.forward(S_k_inlist[k,:, N]), torch.tensor(1))
-#        print('reward(loss): %f, %f sec per epoch \n' % (l, time.time() - start))
+#S_pd=load_asset_path_file(dim,K,N,control_string='Asset_')
 
-all_determine_func[0]=F_N
+S_iter=MyIterableDataset('E:\Sample\\1million\Asset_1.csv','E:\Sample\\1million\Asset_2.csv','E:\Sample\\1million\Asset_3.csv','E:\Sample\\1million\Asset_4.csv','E:\Sample\\1million\Asset_5.csv',1000000,5,9)          #迭代输入数据
+
+#S_iter=combination_five_asset_to_one(pd.read_csv('E:\Sample\\1million\Asset_1.csv'),pd.read_csv('E:\Sample\\1million\Asset_2.csv'),pd.read_csv('E:\Sample\\1million\Asset_3.csv'),pd.read_csv('E:\Sample\\1million\Asset_4.csv'),pd.read_csv('E:\Sample\\1million\Asset_5.csv'),K)
+#S_iter=S_iter.to_numpy()
+
+n=0
+S=torch.ones(K,dim,N+1)
+for S_t in S_iter:             #将迭代格式的数据转化成一个完整的大矩阵
+    S[n:100000+n,:,:]=S_t
+    n+=100000
+#    print('index : %d'%(n))
+#    print(S_t)
+print('n: %d'%(n))
+
+all_determine_func[0]=stopping_determine_model(N,dim,dim+40)   #initialize FN  N时刻初始化
+
 #print(all_determine_func[0])
-target_train_obj=stopping_determine_model(N-1,dim,dim+40)
-target_train_net=target_train_obj.net
-data_iter = data.DataLoader(data.TensorDataset(S), 5, shuffle=True)
-loss=nn.L1Loss()
-optimizer=torch.optim.SGD(target_train_net.parameters(),lr=0.001)
-all_determine_func.append(target_train_obj)
+target_train_obj=stopping_determine_model(N-1,dim,dim+40)      #实例化N-1时刻的决策函数神经网络模型
+target_train_net=target_train_obj.net                          #标记该模型的网络部分
+#data_iteraion_2 = data.DataLoader(S_iter, 10000)
+data_iteration_2=data.DataLoader(data.TensorDataset(S), 10000, shuffle=True)            #将数据重新随机小批量分划，输出一个迭代格式的小批量样本数据集，10000表示batch_size
+#loss=nn.L1Loss()
+#optimizer=torch.optim.SGD(target_train_net.parameters(),lr=0.005)
+optimizer=torch.optim.Adam(target_train_net.parameters())     #使用Adam优化方法
+all_determine_func.append(target_train_obj)                 #将N-1的模型添加进list中
 
-for p in range(10):
+for epoch in range(10):                 #进行10个周期的重复训练
     start = time.time()
-#    print('epoch is %d'%(p))
-    for index, S_k in enumerate(data_iter):
-#        print('index is')
+    print('epoch is %d'%(epoch))
+    for index, S_k in enumerate(data_iteration_2):     #遍历一个周期中的所有小批量样本块
+        print('index is: %d'%(index))
 #        print(index)
 #        print('\n')
-        S_k_inlist=S_k[0]
-        reward = n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
-        l = loss((1 / reward), torch.tensor(0))
-        optimizer.zero_grad()
-        l.backward()
-        optimizer.step()
-        rd=n_average_approxi_expect_reward(S_k_inlist, 5, N-1, N, all_determine_func)
-#        print('reward(loss): %f, %f sec per epoch \n' % (rd, time.time() - start))
+        S_k_inlist=S_k[0]          #由于迭代出来的格式是放在了list中，直接取出来
+        reward = 0- n_average_approxi_expect_reward(S_k_inlist, 10000, N-1, N, all_determine_func)          #用回报函数的平均值作为优化目标函数
+        optimizer.zero_grad()           #每次训练时都将上次的梯度清零
+        reward.backward()           #反向计算
+        optimizer.step()            #将网络中所有参数更新
+        rd=n_average_approxi_expect_reward(S_k_inlist, 10000, N-1, N, all_determine_func)   #为打印数值而再计算一次
 
-print(all_determine_func)
+        print('reward: %f, %f sec per epoch \n' % (rd, time.time() - start))
+        viz.line(X=np.array([index+100*epoch]), Y=np.array([rd.detach().numpy()]), win='tarin_reward',      #用visdom进行每一时刻的数值追踪作图
+                 opts={'title': 'train_reward', 'legend': ['train']}, update='append')
+
+#print(all_determine_func)
 
 # 1 查看网络第一层(即第一个全连接层)的参数
 #print(all_determine_func[1].net[0].state_dict())
@@ -429,3 +517,4 @@ print(torch.cuda.is_available())
 print(torch.cuda.device_count())
 #查看pytorch版本
 print(torch.__version__)
+print('use of time: %f'%(time.time()-time_0))        #程序最终用时
